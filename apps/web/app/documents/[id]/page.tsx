@@ -28,7 +28,7 @@ const api = process.env.NEXT_PUBLIC_API_URL;
 
 export default function DocumentPage() {
   const { id } = useParams<{ id: string }>();
-  const { t } = useLocale();
+  const { t, locale } = useLocale();
   const [doc, setDoc] = useState<Doc | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [question, setQuestion] = useState("");
@@ -87,7 +87,7 @@ export default function DocumentPage() {
       const res = await fetch(`${api}/documents/${id}/chat/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: q }),
+        body: JSON.stringify({ question: q, locale }),
       });
       if (!res.ok || !res.body) {
         throw new Error(await res.text());

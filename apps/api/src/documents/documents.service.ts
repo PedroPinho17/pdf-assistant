@@ -138,12 +138,12 @@ export class DocumentsService {
     }));
   }
 
-  async chat(documentId: string, question: string) {
+  async chat(documentId: string, question: string, locale?: string) {
     const chunks = await this.search(documentId, question);
 
     if (chunks.length === 0) {
       return {
-        answer: 'não encontrei no documento',
+        answer: notFoundMessage(locale),
         sources: [],
       };
     }
@@ -163,7 +163,12 @@ export class DocumentsService {
     };
   }
 
-  async chatStream(documentId: string, question: string, res: import('express').Response) {
+  async chatStream(
+    documentId: string,
+    question: string,
+    res: import('express').Response,
+    locale?: string,
+  ) {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
@@ -182,7 +187,7 @@ export class DocumentsService {
       res.write(`event: sources\ndata: ${JSON.stringify(sources)}\n\n`);
   
       if (chunks.length === 0) {
-        res.write(`data: ${JSON.stringify('não encontrei no documento')}\n\n`);
+        res.write(`data: ${JSON.stringify(notFoundMessage(locale))}\n\n`);
         res.write(`event: done\ndata: \n\n`);
         res.end();
         return;
@@ -211,4 +216,11 @@ function toExcerpt(content: string, max = 200): string {
   if (text.length <= max) return text;
   const cut = text.lastIndexOf(' ', max);
   return `${text.slice(0, cut > max * 0.6 ? cut : max)}…`;
+}
+
+/** Fallback shown when the search returns no chunks (the LLM is not called). */
+function notFoundMessage(locale?: string): string {
+  return locale === 'en'
+    ? "I couldn't find this in the document."
+    : 'Não encontrei isto no documento.';
 }

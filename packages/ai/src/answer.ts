@@ -27,17 +27,18 @@ function buildPrompt(question: string, chunks: AnswerChunk[]): string {
     })
     .join('\n\n');
 
-  return `És um assistente que responde apenas com base nos excertos do documento.
+  return `You are an assistant that answers questions using only the excerpts from a document provided below.
 
-Regras:
-- Usa só a informação dos excertos abaixo.
-- Cita as fontes com [n] (ex.: [1], [2]).
-- Se a resposta não estiver nos excertos, diz exactamente: "não encontrei no documento".
+Rules:
+- Use only the information in the excerpts. Do not use outside knowledge.
+- Cite your sources inline with [n] (e.g. [1], [2]).
+- Always answer in the same language as the question, even if the document is in another language.
+- If the answer is not in the excerpts, say briefly (in the language of the question) that you could not find it in the document.
 
-Excertos:
+Excerpts:
 ${excerpts}
 
-Pergunta: ${question}`;
+Question: ${question}`;
 }
 
 export async function answer(
@@ -49,7 +50,7 @@ export async function answer(
     contents: buildPrompt(question, chunks),
   });
 
-  return response.text ?? 'não encontrei no documento';
+  return response.text ?? '';
 }
 
 export async function* answerStream(

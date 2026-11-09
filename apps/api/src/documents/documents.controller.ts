@@ -115,23 +115,28 @@ export class DocumentsController {
   @Post(':id/chat')
   async chat(
     @Param('id', ParseUUIDPipe) id: string,
-    @Body() body: { question?: string },
+    @Body() body: { question?: string; locale?: string },
   ) {
     if (!body?.question?.trim()) {
       throw new BadRequestException('question is required');
     }
-    return this.documentsService.chat(id, body.question.trim());
+    return this.documentsService.chat(id, body.question.trim(), body.locale);
   }
   
   @Post(':id/chat/stream')
   async chatStream(
     @Param('id', ParseUUIDPipe) id: string,
-    @Body() body: { question?: string },
+    @Body() body: { question?: string; locale?: string },
     @Res() res: Response,
   ) {
     if (!body?.question?.trim()) {
       throw new BadRequestException('question is required');
     }
-    await this.documentsService.chatStream(id, body.question.trim(), res);
+    await this.documentsService.chatStream(
+      id,
+      body.question.trim(),
+      res,
+      body.locale,
+    );
   }
 }
