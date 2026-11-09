@@ -1,0 +1,27 @@
+{
+    "name": "@repo/ai",
+    "version": "0.0.0",
+    "private": true,
+    "type": "module",
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "default": "./dist/index.js"
+        }
+    },
+    "scripts": {
+        "build": "tsc",
+        "check-types": "tsc --noEmit",
+        "dev": "tsc --watch"
+    },
+    "dependencies": {
+        "@google/genai": "^3.0.0",
+        "@huggingface/transformers": "^4.3.2"
+    },
+    "devDependencies": {
+        "@types/node": "^26.6.5",
+        "typescript": "^7.0.2"
+    }
+}
