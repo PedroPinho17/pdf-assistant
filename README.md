@@ -22,6 +22,7 @@ Built as a full-stack RAG (Retrieval-Augmented Generation) application with a qu
 - **Streaming answers** — responses arrive token by token over Server-Sent Events.
 - **Page-level citations** — each answer references its sources; clicking `[n]` opens that page in the built-in PDF preview.
 - **Local embeddings** — `multilingual-e5-small` runs on the server via Transformers.js; only the final answer generation calls an LLM (Google Gemini).
+- **Private accounts** — sign up with email and password; each user only ever sees their own documents and chats (see [Security](#security)).
 - **Persistent conversations** — chat history is stored per document and survives page reloads.
 - **Answers in your language** — the model replies in the language of the question, whatever the document's language.
 - **Polished UI** — drag & drop upload, suggested questions, copy answers, dark mode, Portuguese and English.
@@ -103,11 +104,12 @@ docker/     Database init scripts
 # 1. Install dependencies
 pnpm install
 
-# 2. Configure environment
-cp .env.example .env                          # then set GEMINI_API_KEY and STORAGE_PATH
+# 2. Configure environment — then fill in GEMINI_API_KEY, STORAGE_PATH and
+#    replace every "change-me" / empty secret (commands to generate them are in the file)
+cp .env.example .env
 cp apps/web/.env.example apps/web/.env.local
 
-# 3. Start PostgreSQL (port 5433) and Redis (port 6379)
+# 3. Start PostgreSQL (port 5433) and Redis (port 6379), bound to localhost only
 docker compose up -d
 
 # 4. Build the shared packages (@repo/db, @repo/ai) — repeat after changing them,
@@ -117,7 +119,7 @@ pnpm --filter "./packages/*" build
 # 5. Run each app (separate terminals)
 pnpm --filter api start:dev     # http://localhost:3001
 pnpm --filter worker dev
-pnpm --filter web dev           # http://localhost:3000
+pnpm --filter web dev           # http://localhost:3000  → create an account
 
 # 6. Once the API has created the tables, add the full-text column and search indexes (one time)
 for f in packages/db/sql/*.sql; do docker compose exec -T postgres psql -U pdf -d pdf_assistant < "$f"; done
@@ -130,19 +132,31 @@ for f in packages/db/sql/*.sql; do docker compose exec -T postgres psql -U pdf -
 | Variable | Description |
 | --- | --- |
 | `DATABASE_URL` | PostgreSQL connection string |
-| `REDIS_URL` | Redis connection string |
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | Database credentials used by Docker Compose |
+| `REDIS_PASSWORD` | Redis password (Redis refuses unauthenticated clients) |
+| `REDIS_URL` | Redis connection string, including the password |
 | `PORT` | API port (default `3001`) |
+| `WEB_ORIGIN` | Web app origin — CORS, cookies and which site may embed PDFs |
+| `JWT_SECRET` | Secret that signs session cookies (32+ random characters) |
+| `NODE_ENV` | `production` enables secure cookies and disables schema auto-sync |
 | `STORAGE_PATH` | Folder where uploaded PDFs are stored |
+| `MAX_PDF_PAGES` | Maximum pages per document (default `500`) |
 | `GEMINI_API_KEY` | Google Gemini API key |
 | `GEMINI_MODEL` | Gemini model used for answers |
 | `NEXT_PUBLIC_API_URL` | API URL used by the frontend (`apps/web/.env.local`) |
 
 ## API
 
+All `/documents` routes require a session and only ever return the caller's own documents.
+
 | Method | Endpoint | Description |
 | --- | --- | --- |
-| `POST` | `/documents/upload` | Upload a PDF (`multipart/form-data`, field `file`, max 50 MB) |
-| `GET` | `/documents` | List documents |
+| `POST` | `/auth/register` | Create an account and start a session |
+| `POST` | `/auth/login` | Start a session (sets an httpOnly cookie) |
+| `POST` | `/auth/logout` | End the session |
+| `GET` | `/auth/me` | Current user |
+| `POST` | `/documents/upload` | Upload a PDF (`multipart/form-data`, field `file`, max 25 MB) |
+| `GET` | `/documents` | List your documents |
 | `GET` | `/documents/:id` | Document details and processing status |
 | `GET` | `/documents/:id/file` | Original PDF |
 | `GET` | `/documents/:id/search?q=` | Hybrid search over the document's chunks |
@@ -152,7 +166,23 @@ for f in packages/db/sql/*.sql; do docker compose exec -T postgres psql -U pdf -
 | `DELETE` | `/documents/:id/messages` | Clear the conversation |
 | `DELETE` | `/documents/:id` | Delete a document, its chunks, chat and file |
 
-Chat endpoints accept `{ "question": string, "locale"?: "pt" | "en" }`.
+Chat endpoints accept `{ "question": string (max 1000 chars), "locale"?: "pt" | "en" }`.
+
+## Security
+
+| Area | Measure |
+| --- | --- |
+| **Authentication** | Email + password accounts. Passwords hashed with **scrypt** (per-user salt, constant-time comparison). Login takes the same time whether or not the email exists, so accounts can't be enumerated. |
+| **Sessions** | Signed JWT (HS256, 7 days) in an **httpOnly, SameSite=Lax** cookie (`Secure` in production) — unreadable by JavaScript and not sent on cross-site POSTs. |
+| **Authorization** | A global guard protects every route by default; public routes opt out explicitly. Every query is scoped to the owner, and another user's document returns **404**, not 403, so IDs can't be probed. |
+| **Rate limiting** | `@nestjs/throttler`: 120 req/min per IP overall, 5/min on login/register (brute force), 15/min on chat and 10/min on upload (protects the Gemini budget). |
+| **Upload validation** | Only files that **start with the `%PDF-` signature** are accepted — MIME type and extension are client-controlled. Max 25 MB, max `MAX_PDF_PAGES` pages. Files are stored under random UUID names, never the user's filename. |
+| **Input limits** | Questions capped at 1000 characters; UUIDs validated on every route. |
+| **Injection** | All SQL is parameterized. LLM answers are rendered without `innerHTML`, so model output can't inject scripts. |
+| **Prompt injection** | Rules live in Gemini's **system instruction**, document excerpts are wrapped in `<document>` tags and declared untrusted. *Known limitation:* no prompt-injection defence is perfect — a crafted PDF could still bias an answer about itself. Impact is limited because the model has no tools and no access to other data. |
+| **Error handling** | Internal errors are logged server-side; clients get generic messages. |
+| **HTTP headers** | `helmet`: `nosniff`, HSTS, `frame-ancestors` restricted to the web app, no `X-Powered-By`. PDFs are served `private, no-store`. CORS allows only `WEB_ORIGIN`. |
+| **Infrastructure** | PostgreSQL and Redis listen on **127.0.0.1 only**; Redis requires a password. Secrets live in `.env`, which is git-ignored. Schema auto-sync is disabled when `NODE_ENV=production`. |
 
 ## Tests
 
@@ -162,8 +192,8 @@ pnpm --filter api test
 
 ## Roadmap
 
-- [ ] Database migrations (replace `synchronize`)
-- [ ] Authentication and per-user documents
+- [ ] Database migrations (replace dev-only `synchronize`)
+- [ ] Email verification and password reset
 - [ ] Support Word and other formats (convert to PDF with LibreOffice)
 - [ ] OCR for scanned PDFs
 - [ ] Retrieval evaluation set to measure answer quality
