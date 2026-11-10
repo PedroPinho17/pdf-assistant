@@ -18,6 +18,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { useLocale } from "@/components/locale-provider";
+import { API_URL, apiFetch } from "@/lib/api";
 import { AnswerText } from "@/components/answer-text";
 import { AppControls } from "@/components/app-controls";
 import { StatusBadge } from "@/components/status-badge";
@@ -35,7 +36,7 @@ type ChatMessage = {
   sources: { n: number; page: number | null; excerpt: string }[];
 };
 
-const api = process.env.NEXT_PUBLIC_API_URL;
+const MAX_QUESTION_LENGTH = 1000; // must match the API limit
 
 export default function DocumentPage() {
   const { id } = useParams<{ id: string }>();
@@ -61,18 +62,16 @@ export default function DocumentPage() {
 
     async function load() {
       try {
-        const res = await fetch(`${api}/documents/${id}`);
-        if (!res.ok) throw new Error(await res.text());
+        const res = await apiFetch(`/documents/${id}`);
+        if (!res.ok) throw new Error();
         const data = (await res.json()) as Doc;
         if (cancelled) return;
         setDoc(data);
         if (data.status !== "processed" && data.status !== "failed") {
           timer = setTimeout(load, 2000);
         }
-      } catch (err) {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : t.loadError);
-        }
+      } catch {
+        if (!cancelled) setError(t.loadError);
       }
     }
 
@@ -88,7 +87,7 @@ export default function DocumentPage() {
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch(`${api}/documents/${id}/messages`);
+        const res = await apiFetch(`/documents/${id}/messages`);
         if (!res.ok) return;
         const data = (await res.json()) as ChatMessage[];
         if (!cancelled) setMessages(data);
@@ -119,13 +118,13 @@ export default function DocumentPage() {
     setMessages((prev) => [...prev, { question: q, answer: "", sources: [] }]);
 
     try {
-      const res = await fetch(`${api}/documents/${id}/chat/stream`, {
+      const res = await apiFetch(`/documents/${id}/chat/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question: q, locale }),
       });
       if (!res.ok || !res.body) {
-        throw new Error(await res.text());
+        throw new Error(res.status === 429 ? t.tooManyRequests : t.chatFailed);
       }
 
       const reader = res.body.getReader();
@@ -167,7 +166,14 @@ export default function DocumentPage() {
         }
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : t.chatFailed);
+      // TypeError = network failure; other errors carry an already-localized message
+      setError(
+        err instanceof TypeError
+          ? t.apiOffline
+          : err instanceof Error
+            ? err.message
+            : t.chatFailed,
+      );
     } finally {
       setAsking(false);
     }
@@ -185,7 +191,7 @@ export default function DocumentPage() {
 
   async function clearChat() {
     if (!window.confirm(t.confirmClearChat)) return;
-    const res = await fetch(`${api}/documents/${id}/messages`, {
+    const res = await apiFetch(`/documents/${id}/messages`, {
       method: "DELETE",
     }).catch(() => null);
     if (res?.ok) setMessages([]);
@@ -194,14 +200,14 @@ export default function DocumentPage() {
 
   async function deleteDocument() {
     if (!window.confirm(t.confirmDelete)) return;
-    const res = await fetch(`${api}/documents/${id}`, {
+    const res = await apiFetch(`/documents/${id}`, {
       method: "DELETE",
     }).catch(() => null);
     if (res?.ok) router.push("/");
     else setError(t.deleteFailed);
   }
 
-  const fileUrl = `${api}/documents/${id}/file`;
+  const fileUrl = `${API_URL}/documents/${id}/file`;
   const ready = doc?.status === "processed";
   const suggestions = [t.suggestion1, t.suggestion2, t.suggestion3];
 
@@ -404,6 +410,7 @@ export default function DocumentPage() {
                   }
                 }}
                 placeholder={t.askPlaceholder}
+                maxLength={MAX_QUESTION_LENGTH}
                 disabled={!ready}
                 rows={1}
                 className="max-h-40"

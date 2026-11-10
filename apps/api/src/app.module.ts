@@ -1,10 +1,14 @@
 import { Module } from '@nestjs/common';
+import { APP_GUARD } from '@nestjs/core';
 import { BullModule } from '@nestjs/bullmq';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { ChatMessage, Document, DocumentChunk } from '@repo/db';
+import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
+import { ChatMessage, Document, DocumentChunk, User } from '@repo/db';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
+import { AuthGuard } from './auth/auth.guard';
+import { AuthModule } from './auth/auth.module';
 import { DocumentsModule } from './documents/documents.module';
 
 @Module({
@@ -18,9 +22,10 @@ import { DocumentsModule } from './documents/documents.module';
       useFactory: (config: ConfigService) => ({
         type: 'postgres',
         url: config.getOrThrow<string>('DATABASE_URL'),
-        entities: [Document, DocumentChunk, ChatMessage],
+        entities: [Document, DocumentChunk, ChatMessage, User],
         autoLoadEntities: true,
-        synchronize: true, // só em desenvolvimento
+        // Auto-sync the schema only in development; never in production.
+        synchronize: config.get('NODE_ENV') !== 'production',
       }),
     }),
     BullModule.forRootAsync({
@@ -31,9 +36,18 @@ import { DocumentsModule } from './documents/documents.module';
         },
       }),
     }),
+    // Default rate limit for every route: 120 requests per minute per IP.
+    // Expensive routes (upload, chat, auth) set stricter limits with @Throttle.
+    ThrottlerModule.forRoot([{ name: 'default', ttl: 60_000, limit: 120 }]),
+    AuthModule,
     DocumentsModule,
   ],
   controllers: [AppController],
-  providers: [AppService],
+  providers: [
+    AppService,
+    // Order matters: rate limiting runs before authentication.
+    { provide: APP_GUARD, useClass: ThrottlerGuard },
+    { provide: APP_GUARD, useClass: AuthGuard },
+  ],
 })
 export class AppModule {}

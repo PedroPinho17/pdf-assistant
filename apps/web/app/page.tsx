@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import { useLocale } from "@/components/locale-provider";
+import { apiFetch } from "@/lib/api";
 import { AppControls } from "@/components/app-controls";
 import { StatusBadge } from "@/components/status-badge";
 
@@ -18,7 +19,7 @@ type DocListItem = {
   createdAt: string;
 };
 
-const api = process.env.NEXT_PUBLIC_API_URL;
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024; // must match the API limit
 
 function isPdf(file: File) {
   return (
@@ -39,7 +40,7 @@ export default function Home() {
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch(`${api}/documents`);
+        const res = await apiFetch(`/documents`);
         if (!res.ok) return;
         const data = (await res.json()) as DocListItem[];
         if (!cancelled) setDocs(data);
@@ -59,6 +60,10 @@ export default function Home() {
       setError(t.pdfOnly);
       return;
     }
+    if (f.size > MAX_UPLOAD_BYTES) {
+      setError(t.fileTooLarge);
+      return;
+    }
     setFile(f);
   }
 
@@ -75,22 +80,27 @@ export default function Home() {
 
     setLoading(true);
     try {
-      const res = await fetch(`${api}/documents/upload`, {
+      const res = await apiFetch(`/documents/upload`, {
         method: "POST",
         body,
       });
       if (!res.ok) {
-        throw new Error(await res.text());
+        setError(
+          res.status === 413
+            ? t.fileTooLarge
+            : res.status === 429
+              ? t.tooManyRequests
+              : res.status === 400
+                ? t.pdfOnly
+                : t.uploadFailed,
+        );
+        return;
       }
       const data = (await res.json()) as { id: string };
       router.push(`/documents/${data.id}`);
-    } catch (err) {
-      if (err instanceof TypeError) {
-        // fetch() throws TypeError ("Failed to fetch") when the API is unreachable
-        setError(t.apiOffline);
-      } else {
-        setError(err instanceof Error ? err.message : t.uploadFailed);
-      }
+    } catch {
+      // fetch() throws ("Failed to fetch") when the API is unreachable
+      setError(t.apiOffline);
     } finally {
       setLoading(false);
     }
@@ -99,7 +109,7 @@ export default function Home() {
   async function onDelete(doc: DocListItem) {
     if (!window.confirm(`${t.confirmDelete}\n\n${doc.filename}`)) return;
     try {
-      const res = await fetch(`${api}/documents/${doc.id}`, {
+      const res = await apiFetch(`/documents/${doc.id}`, {
         method: "DELETE",
       });
       if (!res.ok) throw new Error();

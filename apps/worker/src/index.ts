@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { Worker } from 'bullmq';
 import { AppDataSource, Document, DocumentChunk, INGEST_QUEUE } from '@repo/db';
 import { readFile } from 'node:fs/promises';
-import { extractText } from 'unpdf';
+import { extractText, getDocumentProxy } from 'unpdf';
 
 
 import { chunkText } from './chunk.js';
@@ -30,6 +30,9 @@ const storagePath = process.env.STORAGE_PATH ?? '';
 if (!storagePath) {
   throw new Error('STORAGE_PATH is required');
 }
+
+/** Upper bound on pages per document (protects worker CPU and memory). */
+const maxPages = Number(process.env.MAX_PDF_PAGES ?? 500);
 
 type IngestJob = {
   documentId: string;
@@ -58,7 +61,15 @@ async function main() {
 
         const key = doc.storageKey;
         const buffer = await readFile(resolve(storagePath, key));
-        const { text: pages } = await extractText(new Uint8Array(buffer), {
+        // Check the page count before extracting text, so a huge PDF is
+        // rejected quickly instead of tying up the worker.
+        const pdf = await getDocumentProxy(new Uint8Array(buffer));
+        if (pdf.numPages > maxPages) {
+          throw new Error(
+            `Document has ${pdf.numPages} pages (limit is ${maxPages})`,
+          );
+        }
+        const { text: pages } = await extractText(pdf, {
           mergePages: false,
         });
 

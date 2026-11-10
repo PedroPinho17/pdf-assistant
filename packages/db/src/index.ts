@@ -6,3 +6,4 @@ export {
   ChatMessage,
   type ChatSource,
 } from './entities/chat-message.entity.js';
+export { User } from './entities/user.entity.js';

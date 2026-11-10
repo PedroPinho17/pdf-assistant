@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { InjectRepository } from '@nestjs/typeorm';
 import { ConfigService } from '@nestjs/config';
@@ -26,6 +26,7 @@ type UploadedPdf = {
 @Injectable()
 export class DocumentsService {
   private readonly storageDir: string;
+  private readonly logger = new Logger(DocumentsService.name);
 
   constructor(
     @InjectRepository(Document)
@@ -44,15 +45,17 @@ export class DocumentsService {
         : resolve(__dirname, '../../../../storage');
   }
 
-  async upload(file: UploadedPdf): Promise<Document> {
+  async upload(file: UploadedPdf, userId: string): Promise<Document> {
     await mkdir(this.storageDir, { recursive: true });
 
+    // The stored name is a random UUID; the original name is only display text.
     const storageKey = `${randomUUID()}.pdf`;
     await writeFile(resolve(this.storageDir, storageKey), file.buffer);
 
     const document = await this.documents.save(
       this.documents.create({
-        filename: file.originalname,
+        userId,
+        filename: cleanFilename(file.originalname),
         storageKey,
         status: 'pending',
       }),
@@ -67,16 +70,23 @@ export class DocumentsService {
     return document;
   }
 
-  async findOne(id: string): Promise<Document> {
-    const document = await this.documents.findOneBy({ id });
+  /**
+   * Loads a document owned by `userId`. Documents of other users get the same
+   * 404 as missing ones, so IDs of other people's documents are not revealed.
+   */
+  async findOne(id: string, userId: string): Promise<Document> {
+    const document = await this.documents.findOneBy({ id, userId });
     if (!document) {
-      throw new NotFoundException(`Document ${id} not found`);
+      throw new NotFoundException('Document not found');
     }
     return document;
   }
 
-  async getFilePath(id: string): Promise<{ path: string; filename: string }> {
-    const document = await this.findOne(id);
+  async getFilePath(
+    id: string,
+    userId: string,
+  ): Promise<{ path: string; filename: string }> {
+    const document = await this.findOne(id, userId);
     if (!document.storageKey) {
       throw new NotFoundException(`Document ${id} has no file`);
     }
@@ -86,15 +96,16 @@ export class DocumentsService {
     };
   }
 
-  async findAll() {
+  async findAll(userId: string) {
     return this.documents.find({
+      where: { userId },
       order: { createdAt: 'DESC' },
       take: 50,
     });
   }
 
-  async search(documentId: string, q: string) {
-    await this.findOne(documentId);
+  async search(documentId: string, q: string, userId: string) {
+    await this.findOne(documentId, userId);
   
     const queryEmbedding = await embedQuery(q);
     const vector = `[${queryEmbedding.join(',')}]`;
@@ -152,10 +163,10 @@ export class DocumentsService {
     }));
   }
 
-  async remove(id: string): Promise<void> {
-    const document = await this.findOne(id);
+  async remove(id: string, userId: string): Promise<void> {
+    const document = await this.findOne(id, userId);
     // Chunks and chat messages are removed by ON DELETE CASCADE.
-    await this.documents.delete(id);
+    await this.documents.delete({ id, userId });
     if (document.storageKey) {
       await unlink(resolve(this.storageDir, document.storageKey)).catch(
         (err: NodeJS.ErrnoException) => {
@@ -165,8 +176,8 @@ export class DocumentsService {
     }
   }
 
-  async listMessages(documentId: string) {
-    await this.findOne(documentId);
+  async listMessages(documentId: string, userId: string) {
+    await this.findOne(documentId, userId);
     const rows = await this.messages.find({
       where: { documentId },
       order: { createdAt: 'ASC' },
@@ -180,8 +191,8 @@ export class DocumentsService {
     }));
   }
 
-  async clearMessages(documentId: string): Promise<void> {
-    await this.findOne(documentId);
+  async clearMessages(documentId: string, userId: string): Promise<void> {
+    await this.findOne(documentId, userId);
     await this.messages.delete({ documentId });
   }
 
@@ -196,8 +207,13 @@ export class DocumentsService {
     );
   }
 
-  async chat(documentId: string, question: string, locale?: string) {
-    const chunks = await this.search(documentId, question);
+  async chat(
+    documentId: string,
+    question: string,
+    userId: string,
+    locale?: string,
+  ) {
+    const chunks = await this.search(documentId, question, userId);
     const sources = toSources(chunks);
 
     const answerText =
@@ -215,9 +231,14 @@ export class DocumentsService {
   async chatStream(
     documentId: string,
     question: string,
+    userId: string,
     res: import('express').Response,
     locale?: string,
   ) {
+    // Ownership is checked before the stream starts, so a foreign or missing
+    // document still gets a normal 404 response instead of an SSE error.
+    await this.findOne(documentId, userId);
+
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
@@ -229,7 +250,7 @@ export class DocumentsService {
       );
 
     try {
-      const chunks = await this.search(documentId, question);
+      const chunks = await this.search(documentId, question, userId);
       const sources = toSources(chunks);
 
       // SSE format: optional "event:" line, "data:" line, blank line
@@ -253,8 +274,12 @@ export class DocumentsService {
       send('', 'done');
       res.end();
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'stream failed';
-      send(message, 'error');
+      // Full details stay in the server log; the client gets a generic message.
+      this.logger.error(
+        `chat stream failed for document ${documentId}`,
+        err instanceof Error ? err.stack : String(err),
+      );
+      send(chatErrorMessage(locale), 'error');
       res.end();
     }
   }
@@ -276,9 +301,22 @@ function toExcerpt(content: string, max = 200): string {
   return `${text.slice(0, cut > max * 0.6 ? cut : max)}…`;
 }
 
+/** Display-safe filename: no control characters, bounded length. */
+function cleanFilename(name: string): string {
+  // eslint-disable-next-line no-control-regex
+  const cleaned = name.replace(/[\u0000-\u001f\u007f]/g, '').trim();
+  return (cleaned || 'document.pdf').slice(0, 255);
+}
+
 /** Fallback shown when the search returns no chunks (the LLM is not called). */
 function notFoundMessage(locale?: string): string {
   return locale === 'en'
     ? "I couldn't find this in the document."
     : 'Não encontrei isto no documento.';
+}
+
+function chatErrorMessage(locale?: string): string {
+  return locale === 'en'
+    ? 'Something went wrong while answering. Please try again.'
+    : 'Ocorreu um erro ao responder. Tenta novamente.';
 }
