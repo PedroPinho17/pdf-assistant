@@ -1,15 +1,26 @@
 "use client";
 
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import { ArrowLeft, ExternalLink, FileText, Loader2, Send } from "lucide-react";
+import {
+  ArrowLeft,
+  Check,
+  Copy,
+  Eraser,
+  ExternalLink,
+  FileText,
+  Loader2,
+  Send,
+  Sparkles,
+  Trash2,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
+import { Textarea } from "@/components/ui/textarea";
 import { useLocale } from "@/components/locale-provider";
 import { AnswerText } from "@/components/answer-text";
-import { LocaleSwitcher } from "@/components/locale-switcher";
+import { AppControls } from "@/components/app-controls";
+import { StatusBadge } from "@/components/status-badge";
 
 type Doc = {
   id: string;
@@ -28,6 +39,7 @@ const api = process.env.NEXT_PUBLIC_API_URL;
 
 export default function DocumentPage() {
   const { id } = useParams<{ id: string }>();
+  const router = useRouter();
   const { t, locale } = useLocale();
   const [doc, setDoc] = useState<Doc | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -35,12 +47,14 @@ export default function DocumentPage() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [asking, setAsking] = useState(false);
   const [pdfPage, setPdfPage] = useState(1);
+  const [copied, setCopied] = useState<number | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ block: "end" });
   }, [messages]);
 
+  // Document details (polls until processing finishes)
   useEffect(() => {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -69,19 +83,40 @@ export default function DocumentPage() {
     };
   }, [id, t.loadError]);
 
-  async function onAsk(e: React.FormEvent) {
-    e.preventDefault();
-    const q = question.trim();
-    if (!q) return;
+  // Saved conversation
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`${api}/documents/${id}/messages`);
+        if (!res.ok) return;
+        const data = (await res.json()) as ChatMessage[];
+        if (!cancelled) setMessages(data);
+      } catch {
+        // history is optional; chat still works without it
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
+
+  function updateLast(fn: (m: ChatMessage) => ChatMessage) {
+    setMessages((prev) => {
+      const last = prev[prev.length - 1];
+      if (!last) return prev;
+      return [...prev.slice(0, -1), fn(last)];
+    });
+  }
+
+  async function ask(raw: string) {
+    const q = raw.trim();
+    if (!q || asking) return;
 
     setAsking(true);
     setError(null);
     setQuestion("");
-
-    setMessages((prev) => [
-      ...prev,
-      { question: q, answer: "", sources: [] },
-    ]);
+    setMessages((prev) => [...prev, { question: q, answer: "", sources: [] }]);
 
     try {
       const res = await fetch(`${api}/documents/${id}/chat/stream`, {
@@ -106,11 +141,10 @@ export default function DocumentPage() {
         buffer = parts.pop() ?? "";
 
         for (const part of parts) {
-          const lines = part.split("\n");
           let eventName = "message";
           let dataLine: string | null = null;
 
-          for (const line of lines) {
+          for (const line of part.split("\n")) {
             if (line.startsWith("event:")) {
               eventName = line.slice(6).trim();
             } else if (line.startsWith("data:")) {
@@ -118,31 +152,17 @@ export default function DocumentPage() {
             }
           }
 
-          if (eventName === "sources" && dataLine) {
+          if (eventName === "done") continue;
+          if (!dataLine) continue;
+
+          if (eventName === "sources") {
             const sources = JSON.parse(dataLine) as ChatMessage["sources"];
-            setMessages((prev) => {
-              const next = [...prev];
-              const last = next[next.length - 1];
-              if (!last) return prev;
-              next[next.length - 1] = { ...last, sources };
-              return next;
-            });
-          } else if (eventName === "error" && dataLine) {
+            updateLast((m) => ({ ...m, sources }));
+          } else if (eventName === "error") {
             throw new Error(JSON.parse(dataLine) as string);
-          } else if (eventName === "done") {
-            // stream finished
-          } else if (dataLine) {
+          } else {
             const text = JSON.parse(dataLine) as string;
-            setMessages((prev) => {
-              const next = [...prev];
-              const last = next[next.length - 1];
-              if (!last) return prev;
-              next[next.length - 1] = {
-                ...last,
-                answer: last.answer + text,
-              };
-              return next;
-            });
+            updateLast((m) => ({ ...m, answer: m.answer + text }));
           }
         }
       }
@@ -153,8 +173,37 @@ export default function DocumentPage() {
     }
   }
 
+  async function copyAnswer(i: number, text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(i);
+      setTimeout(() => setCopied((c) => (c === i ? null : c)), 1500);
+    } catch {
+      // clipboard not available (e.g. insecure context)
+    }
+  }
+
+  async function clearChat() {
+    if (!window.confirm(t.confirmClearChat)) return;
+    const res = await fetch(`${api}/documents/${id}/messages`, {
+      method: "DELETE",
+    }).catch(() => null);
+    if (res?.ok) setMessages([]);
+    else setError(t.deleteFailed);
+  }
+
+  async function deleteDocument() {
+    if (!window.confirm(t.confirmDelete)) return;
+    const res = await fetch(`${api}/documents/${id}`, {
+      method: "DELETE",
+    }).catch(() => null);
+    if (res?.ok) router.push("/");
+    else setError(t.deleteFailed);
+  }
+
   const fileUrl = `${api}/documents/${id}/file`;
   const ready = doc?.status === "processed";
+  const suggestions = [t.suggestion1, t.suggestion2, t.suggestion3];
 
   return (
     <main className="mx-auto flex min-h-svh w-full max-w-7xl flex-col gap-4 px-4 py-4 lg:h-svh">
@@ -163,18 +212,29 @@ export default function DocumentPage() {
           <Button asChild variant="ghost" size="sm">
             <Link href="/">
               <ArrowLeft className="size-4" />
-              {t.back}
+              <span className="hidden sm:inline">{t.back}</span>
             </Link>
           </Button>
           <h1 className="flex min-w-0 items-center gap-2 font-semibold">
             <FileText className="size-5 shrink-0 text-muted-foreground" />
             <span className="truncate">{doc?.filename ?? t.document}</span>
           </h1>
-          <Badge variant={doc?.status === "failed" ? "destructive" : "secondary"}>
-            {doc?.status ?? t.loading}
-          </Badge>
+          <StatusBadge status={doc?.status} />
         </div>
-        <LocaleSwitcher />
+        <div className="flex shrink-0 items-center gap-2">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            onClick={deleteDocument}
+            aria-label={t.deleteDocument}
+            title={t.deleteDocument}
+            className="text-muted-foreground hover:text-destructive"
+          >
+            <Trash2 />
+          </Button>
+          <AppControls />
+        </div>
       </header>
 
       <div className="grid min-h-0 flex-1 gap-4 lg:grid-cols-2 lg:grid-rows-[minmax(0,1fr)]">
@@ -202,7 +262,22 @@ export default function DocumentPage() {
 
         {/* Chat */}
         <section className="flex h-[70svh] flex-col overflow-hidden rounded-xl border bg-card lg:h-auto lg:min-h-0">
-          <div className="border-b px-4 py-2 text-sm font-medium">{t.ask}</div>
+          <div className="flex h-11 items-center justify-between border-b px-4">
+            <span className="text-sm font-medium">{t.ask}</span>
+            {messages.length > 0 ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="xs"
+                onClick={clearChat}
+                disabled={asking}
+                className="text-muted-foreground"
+              >
+                <Eraser />
+                {t.clearChat}
+              </Button>
+            ) : null}
+          </div>
 
           <div className="flex-1 space-y-6 overflow-y-auto p-4">
             {doc?.status === "failed" ? (
@@ -213,16 +288,35 @@ export default function DocumentPage() {
                 {t.processing}
               </p>
             ) : messages.length === 0 ? (
-              <p className="text-sm text-muted-foreground">{t.emptyChat}</p>
+              <div className="flex h-full flex-col items-center justify-center gap-4 text-center">
+                <Sparkles className="size-8 text-muted-foreground" />
+                <p className="text-sm text-muted-foreground">{t.emptyChat}</p>
+                <div className="flex w-full max-w-sm flex-col gap-2">
+                  <span className="text-xs font-medium text-muted-foreground">
+                    {t.suggestionsTitle}
+                  </span>
+                  {suggestions.map((s) => (
+                    <button
+                      key={s}
+                      type="button"
+                      onClick={() => ask(s)}
+                      className="rounded-lg border px-3 py-2 text-left text-sm transition-colors hover:bg-muted"
+                    >
+                      {s}
+                    </button>
+                  ))}
+                </div>
+              </div>
             ) : (
               messages.map((m, i) => {
                 const cite = (n: number) => {
                   const page = m.sources.find((s) => s.n === n)?.page;
                   if (page != null) setPdfPage(page);
                 };
+                const streaming = asking && i === messages.length - 1;
                 return (
                   <div key={i} className="flex flex-col gap-2">
-                    <div className="max-w-[85%] self-end rounded-2xl rounded-br-sm bg-primary px-3 py-2 text-sm text-primary-foreground">
+                    <div className="max-w-[85%] self-end rounded-2xl rounded-br-sm bg-primary px-3 py-2 text-sm whitespace-pre-wrap text-primary-foreground">
                       {m.question}
                     </div>
                     <div className="max-w-[90%] self-start rounded-2xl rounded-bl-sm bg-muted px-3 py-2 text-sm leading-relaxed">
@@ -232,30 +326,49 @@ export default function DocumentPage() {
                         <Loader2 className="size-4 animate-spin text-muted-foreground" />
                       )}
                     </div>
-                    {m.sources.length > 0 ? (
-                      <details className="group max-w-[90%] self-start text-xs">
-                        <summary className="cursor-pointer list-none text-muted-foreground select-none hover:text-foreground">
-                          <span className="inline-block transition-transform group-open:rotate-90">›</span>{" "}
-                          {t.sources} ({m.sources.length})
-                        </summary>
-                        <ul className="mt-2 flex flex-col gap-1">
-                          {m.sources.map((s) => (
-                            <li key={s.n}>
-                              <button
-                                type="button"
-                                disabled={s.page == null}
-                                onClick={() => cite(s.n)}
-                                className="w-full rounded-md border px-2 py-1.5 text-left text-muted-foreground transition-colors hover:bg-muted disabled:cursor-default disabled:hover:bg-transparent"
-                              >
-                                <span className="font-medium text-foreground">
-                                  [{s.n}] {t.page} {s.page ?? "?"}
-                                </span>{" "}
-                                — <span className="line-clamp-2 inline">{s.excerpt}</span>
-                              </button>
-                            </li>
-                          ))}
-                        </ul>
-                      </details>
+                    {m.answer && !streaming ? (
+                      <div className="flex max-w-[90%] items-start gap-3 self-start">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="xs"
+                          onClick={() => copyAnswer(i, m.answer)}
+                          className="text-muted-foreground"
+                        >
+                          {copied === i ? <Check /> : <Copy />}
+                          {copied === i ? t.copied : t.copy}
+                        </Button>
+                        {m.sources.length > 0 ? (
+                          <details className="group min-w-0 flex-1 text-xs">
+                            <summary className="flex h-6 cursor-pointer list-none items-center text-muted-foreground select-none hover:text-foreground">
+                              <span className="mr-1 inline-block transition-transform group-open:rotate-90">
+                                ›
+                              </span>
+                              {t.sources} ({m.sources.length})
+                            </summary>
+                            <ul className="mt-2 flex flex-col gap-1">
+                              {m.sources.map((s) => (
+                                <li key={s.n}>
+                                  <button
+                                    type="button"
+                                    disabled={s.page == null}
+                                    onClick={() => cite(s.n)}
+                                    className="w-full rounded-md border px-2 py-1.5 text-left text-muted-foreground transition-colors hover:bg-muted disabled:cursor-default disabled:hover:bg-transparent"
+                                  >
+                                    <span className="font-medium text-foreground">
+                                      [{s.n}] {t.page} {s.page ?? "?"}
+                                    </span>{" "}
+                                    —{" "}
+                                    <span className="line-clamp-2 inline">
+                                      {s.excerpt}
+                                    </span>
+                                  </button>
+                                </li>
+                              ))}
+                            </ul>
+                          </details>
+                        ) : null}
+                      </div>
                     ) : null}
                   </div>
                 );
@@ -269,21 +382,48 @@ export default function DocumentPage() {
             <div ref={chatEndRef} />
           </div>
 
-          <form onSubmit={onAsk} className="flex gap-2 border-t p-3">
-            <Input
-              value={question}
-              onChange={(e) => setQuestion(e.target.value)}
-              placeholder={t.askPlaceholder}
-              disabled={!ready}
-            />
-            <Button type="submit" disabled={!ready || asking || !question.trim()}>
-              {asking ? (
-                <Loader2 className="size-4 animate-spin" />
-              ) : (
-                <Send className="size-4" />
-              )}
-              <span className="sr-only sm:not-sr-only">{t.send}</span>
-            </Button>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void ask(question);
+            }}
+            className="flex flex-col gap-1 border-t p-3"
+          >
+            <div className="flex items-end gap-2">
+              <Textarea
+                value={question}
+                onChange={(e) => setQuestion(e.target.value)}
+                onKeyDown={(e) => {
+                  if (
+                    e.key === "Enter" &&
+                    !e.shiftKey &&
+                    !e.nativeEvent.isComposing
+                  ) {
+                    e.preventDefault();
+                    void ask(question);
+                  }
+                }}
+                placeholder={t.askPlaceholder}
+                disabled={!ready}
+                rows={1}
+                className="max-h-40"
+              />
+              <Button
+                type="submit"
+                size="lg"
+                disabled={!ready || asking || !question.trim()}
+              >
+                {asking ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <Send className="size-4" />
+                )}
+                <span className="sr-only sm:not-sr-only">{t.send}</span>
+              </Button>
+            </div>
+            <span className="hidden text-[11px] text-muted-foreground sm:block">
+              {t.newLineHint}
+            </span>
           </form>
         </section>
       </div>

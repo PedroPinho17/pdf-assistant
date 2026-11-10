@@ -1,6 +1,8 @@
 import {
   BadRequestException,
   Controller,
+  Delete,
+  HttpCode,
   Get,
   Param,
   ParseUUIDPipe,
@@ -77,6 +79,23 @@ export class DocumentsController {
       status: document.status,
       createdAt: document.createdAt,
     };
+  }
+
+  @Delete(':id')
+  @HttpCode(204)
+  async remove(@Param('id', ParseUUIDPipe) id: string) {
+    await this.documentsService.remove(id);
+  }
+
+  @Get(':id/messages')
+  async messages(@Param('id', ParseUUIDPipe) id: string) {
+    return this.documentsService.listMessages(id);
+  }
+
+  @Delete(':id/messages')
+  @HttpCode(204)
+  async clearMessages(@Param('id', ParseUUIDPipe) id: string) {
+    await this.documentsService.clearMessages(id);
   }
 
   @Get(':id/file')

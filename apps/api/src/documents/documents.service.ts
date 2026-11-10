@@ -2,9 +2,15 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { InjectRepository } from '@nestjs/typeorm';
 import { ConfigService } from '@nestjs/config';
-import { Document, DocumentChunk, INGEST_QUEUE } from '@repo/db';
+import {
+  ChatMessage,
+  type ChatSource,
+  Document,
+  DocumentChunk,
+  INGEST_QUEUE,
+} from '@repo/db';
 import { Queue } from 'bullmq';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, unlink, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { Repository } from 'typeorm';
@@ -26,6 +32,8 @@ export class DocumentsService {
     private readonly documents: Repository<Document>,
     @InjectRepository(DocumentChunk)
     private readonly chunks: Repository<DocumentChunk>,
+    @InjectRepository(ChatMessage)
+    private readonly messages: Repository<ChatMessage>,
     @InjectQueue(INGEST_QUEUE) private readonly ingestQueue: Queue,
     config: ConfigService,
   ) {
@@ -96,17 +104,23 @@ export class DocumentsService {
       page: number | null;
       content: string;
       score: number;
-    }> = await this.documents.query(
-      `
-      SELECT id, page, content, 1 - (embedding <=> $1::vector) AS score
-      FROM document_chunks
-      WHERE "documentId" = $2
-        AND embedding IS NOT NULL
-      ORDER BY embedding <=> $1::vector
-      LIMIT 20
-      `,
-      [vector, documentId],
-    );
+    }> = await this.documents.manager.transaction(async (tx) => {
+      // With the HNSW index, the WHERE filter is applied after the index scan,
+      // which could return fewer than LIMIT rows. pgvector >= 0.8 iterative
+      // scans keep searching until enough rows match, in exact distance order.
+      await tx.query(`SET LOCAL hnsw.iterative_scan = strict_order`);
+      return tx.query(
+        `
+        SELECT id, page, content, 1 - (embedding <=> $1::vector) AS score
+        FROM document_chunks
+        WHERE "documentId" = $2
+          AND embedding IS NOT NULL
+        ORDER BY embedding <=> $1::vector
+        LIMIT 20
+        `,
+        [vector, documentId],
+      );
+    });
 
     const keywordRows: Array<{
       id: string;
@@ -138,29 +152,64 @@ export class DocumentsService {
     }));
   }
 
+  async remove(id: string): Promise<void> {
+    const document = await this.findOne(id);
+    // Chunks and chat messages are removed by ON DELETE CASCADE.
+    await this.documents.delete(id);
+    if (document.storageKey) {
+      await unlink(resolve(this.storageDir, document.storageKey)).catch(
+        (err: NodeJS.ErrnoException) => {
+          if (err.code !== 'ENOENT') throw err;
+        },
+      );
+    }
+  }
+
+  async listMessages(documentId: string) {
+    await this.findOne(documentId);
+    const rows = await this.messages.find({
+      where: { documentId },
+      order: { createdAt: 'ASC' },
+    });
+    return rows.map((m) => ({
+      id: m.id,
+      question: m.question,
+      answer: m.answer,
+      sources: m.sources,
+      createdAt: m.createdAt,
+    }));
+  }
+
+  async clearMessages(documentId: string): Promise<void> {
+    await this.findOne(documentId);
+    await this.messages.delete({ documentId });
+  }
+
+  private async saveMessage(
+    documentId: string,
+    question: string,
+    answer: string,
+    sources: ChatSource[],
+  ) {
+    await this.messages.save(
+      this.messages.create({ documentId, question, answer, sources }),
+    );
+  }
+
   async chat(documentId: string, question: string, locale?: string) {
     const chunks = await this.search(documentId, question);
+    const sources = toSources(chunks);
 
-    if (chunks.length === 0) {
-      return {
-        answer: notFoundMessage(locale),
-        sources: [],
-      };
-    }
-  
-    const answerText = await answer(
-      question,
-      chunks.map((c) => ({ page: c.page, content: c.content })),
-    );
-  
-    return {
-      answer: answerText,
-      sources: chunks.map((c, i) => ({
-        n: i + 1,
-        page: c.page,
-        excerpt: toExcerpt(c.content),
-      })),
-    };
+    const answerText =
+      chunks.length === 0
+        ? notFoundMessage(locale)
+        : await answer(
+            question,
+            chunks.map((c) => ({ page: c.page, content: c.content })),
+          );
+
+    await this.saveMessage(documentId, question, answerText, sources);
+    return { answer: answerText, sources };
   }
 
   async chatStream(
@@ -173,41 +222,50 @@ export class DocumentsService {
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
     res.flushHeaders?.();
-  
+
+    const send = (data: unknown, event?: string) =>
+      res.write(
+        `${event ? `event: ${event}\n` : ''}data: ${JSON.stringify(data)}\n\n`,
+      );
+
     try {
       const chunks = await this.search(documentId, question);
-  
-      const sources = chunks.map((c, i) => ({
-        n: i + 1,
-        page: c.page,
-        excerpt: toExcerpt(c.content),
-      }));
-  
-      // formato SSE: linha event, linha data, linha em branco
-      res.write(`event: sources\ndata: ${JSON.stringify(sources)}\n\n`);
-  
+      const sources = toSources(chunks);
+
+      // SSE format: optional "event:" line, "data:" line, blank line
+      send(sources, 'sources');
+
+      let full = '';
       if (chunks.length === 0) {
-        res.write(`data: ${JSON.stringify(notFoundMessage(locale))}\n\n`);
-        res.write(`event: done\ndata: \n\n`);
-        res.end();
-        return;
+        full = notFoundMessage(locale);
+        send(full);
+      } else {
+        for await (const text of answerStream(
+          question,
+          chunks.map((c) => ({ page: c.page, content: c.content })),
+        )) {
+          full += text;
+          send(text);
+        }
       }
-  
-      for await (const text of answerStream(
-        question,
-        chunks.map((c) => ({ page: c.page, content: c.content })),
-      )) {
-        res.write(`data: ${JSON.stringify(text)}\n\n`);
-      }
-  
-      res.write(`event: done\ndata: \n\n`);
+
+      await this.saveMessage(documentId, question, full, sources);
+      send('', 'done');
       res.end();
     } catch (err) {
       const message = err instanceof Error ? err.message : 'stream failed';
-      res.write(`event: error\ndata: ${JSON.stringify(message)}\n\n`);
+      send(message, 'error');
       res.end();
     }
   }
+}
+
+function toSources(chunks: { page: number | null; content: string }[]) {
+  return chunks.map((c, i) => ({
+    n: i + 1,
+    page: c.page,
+    excerpt: toExcerpt(c.content),
+  }));
 }
 
 /** Short, word-aligned preview of a chunk for the UI. */

@@ -2,7 +2,7 @@ import { Module } from '@nestjs/common';
 import { BullModule } from '@nestjs/bullmq';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { Document, DocumentChunk } from '@repo/db';
+import { ChatMessage, Document, DocumentChunk } from '@repo/db';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { DocumentsModule } from './documents/documents.module';
@@ -18,7 +18,7 @@ import { DocumentsModule } from './documents/documents.module';
       useFactory: (config: ConfigService) => ({
         type: 'postgres',
         url: config.getOrThrow<string>('DATABASE_URL'),
-        entities: [Document, DocumentChunk],
+        entities: [Document, DocumentChunk, ChatMessage],
         autoLoadEntities: true,
         synchronize: true, // só em desenvolvimento
       }),

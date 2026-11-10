@@ -1,17 +1,27 @@
 import {
   Column,
   Entity,
+  Index,
   JoinColumn,
   ManyToOne,
   PrimaryGeneratedColumn,
 } from 'typeorm';
 import { Document } from './document.entity.js';
 
+/*
+ * GIN (full-text) and HNSW (vector) indexes need operator classes TypeORM
+ * cannot express, so they are created in packages/db/sql/*.sql.
+ * `synchronize: false` declares them here so schema sync never drops them.
+ */
 @Entity({ name: 'document_chunks' })
+@Index('document_chunks_tsv_gin', { synchronize: false })
+@Index('document_chunks_embedding_hnsw', { synchronize: false })
 export class DocumentChunk {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
 
+  // Every search filters by document, and ON DELETE CASCADE looks chunks up by it.
+  @Index('document_chunks_document_id_idx')
   @Column({ type: 'uuid' })
   documentId!: string;
 

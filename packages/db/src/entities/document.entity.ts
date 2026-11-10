@@ -7,6 +7,7 @@ import {
   UpdateDateColumn,
 } from 'typeorm';
 import { DocumentChunk } from './document-chunk.entity.js';
+import { ChatMessage } from './chat-message.entity.js';
 
 @Entity({ name: 'documents' })
 export class Document {
@@ -24,6 +25,9 @@ export class Document {
 
   @OneToMany(() => DocumentChunk, (chunk) => chunk.document)
   chunks!: DocumentChunk[];
+
+  @OneToMany(() => ChatMessage, (message) => message.document)
+  messages!: ChatMessage[];
 
   @CreateDateColumn()
   createdAt!: Date;
