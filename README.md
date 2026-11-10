@@ -4,6 +4,11 @@ Upload a PDF and chat with it. Answers are grounded in the document, streamed in
 
 Built as a full-stack RAG (Retrieval-Augmented Generation) application with a queue-based ingestion pipeline and hybrid search.
 
+<p align="center">
+  <img src="docs/media/demo.gif" alt="Demo: uploading a PDF, asking questions and getting cited answers" width="900">
+</p>
+<p align="center"><sub>Demo at 2× speed · <a href="docs/media/demo.mp4">full-quality video</a> · sample document: a fictional coffee shop guide</sub></p>
+
 ![Next.js](https://img.shields.io/badge/Next.js-16-black?logo=next.js)
 ![NestJS](https://img.shields.io/badge/NestJS-12-E0234E?logo=nestjs)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-pgvector-4169E1?logo=postgresql&logoColor=white)
@@ -17,7 +22,15 @@ Built as a full-stack RAG (Retrieval-Augmented Generation) application with a qu
 - **Streaming answers** — responses arrive token by token over Server-Sent Events.
 - **Page-level citations** — each answer references its sources; clicking `[n]` opens that page in the built-in PDF preview.
 - **Local embeddings** — `multilingual-e5-small` runs on the server via Transformers.js; only the final answer generation calls an LLM (Google Gemini).
-- **Bilingual UI** — Portuguese and English.
+- **Persistent conversations** — chat history is stored per document and survives page reloads.
+- **Answers in your language** — the model replies in the language of the question, whatever the document's language.
+- **Polished UI** — drag & drop upload, suggested questions, copy answers, dark mode, Portuguese and English.
+
+## Screenshots
+
+| Suggested questions on a new document | Cited answers with clickable sources |
+| --- | --- |
+| ![Document page with PDF preview and suggested questions](docs/media/suggestions.png) | ![Chat with streamed answers and page citations](docs/media/chat.png) |
 
 ## Architecture
 
@@ -49,6 +62,7 @@ flowchart LR
 | Chunks never span pages | Every chunk belongs to exactly one page, so citations always point to the right place. |
 | Local embedding model | No per-token cost for indexing, and documents are not sent to a third party just to be indexed. |
 | pgvector instead of a dedicated vector DB | One database for documents, chunks, vectors and full-text indexes — simpler to operate and query. |
+| HNSW + GIN + `documentId` indexes | HNSW (`vector_cosine_ops`) keeps semantic search fast on large documents, GIN does the same for full-text, and a B-tree on `documentId` serves the per-document filter. pgvector's iterative scan guarantees enough results when filtering an HNSW scan. |
 
 ## Tech stack
 
@@ -96,13 +110,17 @@ cp apps/web/.env.example apps/web/.env.local
 # 3. Start PostgreSQL (port 5433) and Redis (port 6379)
 docker compose up -d
 
-# 4. Run each app (separate terminals)
+# 4. Build the shared packages (@repo/db, @repo/ai) — repeat after changing them,
+#    or use `pnpm dev` at the root, which rebuilds them in watch mode
+pnpm --filter "./packages/*" build
+
+# 5. Run each app (separate terminals)
 pnpm --filter api start:dev     # http://localhost:3001
 pnpm --filter worker dev
 pnpm --filter web dev           # http://localhost:3000
 
-# 5. Once the API has created the tables, add the full-text search column (one time)
-docker compose exec -T postgres psql -U pdf -d pdf_assistant < packages/db/sql/001_document_chunks_tsv.sql
+# 6. Once the API has created the tables, add the full-text column and search indexes (one time)
+for f in packages/db/sql/*.sql; do docker compose exec -T postgres psql -U pdf -d pdf_assistant < "$f"; done
 ```
 
 > The first ingestion downloads the embedding model (~120 MB), so it takes a bit longer.
@@ -130,6 +148,11 @@ docker compose exec -T postgres psql -U pdf -d pdf_assistant < packages/db/sql/0
 | `GET` | `/documents/:id/search?q=` | Hybrid search over the document's chunks |
 | `POST` | `/documents/:id/chat` | Ask a question (JSON response) |
 | `POST` | `/documents/:id/chat/stream` | Ask a question (Server-Sent Events) |
+| `GET` | `/documents/:id/messages` | Saved conversation |
+| `DELETE` | `/documents/:id/messages` | Clear the conversation |
+| `DELETE` | `/documents/:id` | Delete a document, its chunks, chat and file |
+
+Chat endpoints accept `{ "question": string, "locale"?: "pt" | "en" }`.
 
 ## Tests
 
@@ -141,7 +164,8 @@ pnpm --filter api test
 
 - [ ] Database migrations (replace `synchronize`)
 - [ ] Authentication and per-user documents
-- [ ] Delete documents
+- [ ] Support Word and other formats (convert to PDF with LibreOffice)
+- [ ] OCR for scanned PDFs
 - [ ] Retrieval evaluation set to measure answer quality
 - [ ] Multi-document chat
 
