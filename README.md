@@ -1,5 +1,7 @@
 # PDF Assistant
 
+<p align="right"><b>English</b> · <a href="README.pt-PT.md">Português</a></p>
+
 Upload a PDF and chat with it. Answers are grounded in the document, streamed in real time, and every claim cites the page it came from — click a citation and the PDF viewer jumps straight to it.
 
 Built as a full-stack RAG (Retrieval-Augmented Generation) application with a queue-based ingestion pipeline and hybrid search.
