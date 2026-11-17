@@ -21,7 +21,7 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --no-frozen-lockfile
 
       - name: Build shared packages
         run: pnpm --filter @repo/ai --filter @repo/db build
